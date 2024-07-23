@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-builder_version=1.0.0
+builder_version=1.0.3
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -27,6 +27,17 @@ KERNEL_FRAMEWORK_ROOT='/System/Library/Frameworks/Kernel.framework/Versions/A'
 KC_VARIANT="$KERNEL_CONFIG"
 KERNEL_TYPE="${KC_VARIANT}.$MACHINE_CONFIG"
 TIGHTBEAMC="tightbeamc-not-supported"
+xnu_built_version=""
+kernel_config_folder=""
+kerneltypekc=""
+kernel_path=""
+BKE=""
+SKE=""
+boot_volume=""
+part_of_whole=""
+volume_name=""
+main_apfs_volume=""
+APFSMountPoint=""
 
 # Function to update the functions above, via command args
 update_globals() {
@@ -73,6 +84,11 @@ error() {
     echo -e "\033[0;31m[ERROR] $1\033[0m" >&2
 }
 
+# Function to print warning messages
+warning() {
+    echo -e "\033[38;2;255;33;203m[WARNING] $1\033[0m"
+}
+
 # Function to print info messages
 info() {
     echo -e "\033[38;2;255;233;161m[INFO] $1\033[0m"
@@ -89,9 +105,10 @@ headers_status() {
 
 # Function to display help message
 show_help() {
-    echo "Usage:   ./build.sh [options] <action>"
+    echo "Usage:   ./build.sh <action> [options]"
     echo "Example: ./build.sh fetch"
     echo "Example: ./build.sh clean"
+    echo "Example: ./build.sh install"
     echo "Example: ./build.sh build -k DEVELOPMENT -a X86_64"
     echo "Example: ./build.sh build -k RELEASE -a ARM64 -m VMAPPLE"
     echo ""
@@ -99,21 +116,25 @@ show_help() {
     echo "  fetch       Fetch the Carnations XNU Source Code"
     echo "  clean       Clean build artifacts"
     echo "  build       Build the source code"
+    echo "  install     Install the built Kernel"
     echo ""
     echo "Options:"
     echo "  -h, --help         Show this help message"
     echo "  -v, --version      Show the version of the script"
     echo "  -k, --kerneltype   Set kernel type (RELEASE / DEVELOPMENT)"
     echo "  -a, --arch         Set architecture (x86_64 / ARM64)"
-    echo "  -m, --machine      Set machine configuration (T8101, T8103, T6000, VMAPPLE for ARM64 only)"
+    echo "  -m, --machine      Set machine configuration (For ARM64 only)"
 }
 
 show_valid_machines() {
     echo "Valid Machine configurations are:"
     echo ""
+    echo "BCM2837 (Generic ARM Platform)"
     echo "T8101 (Apple A14 Bionic)"
     echo "T8103 (Apple M1)"
+    echo "T8112 (Apple M2)"
     echo "T6000 (Apple M1 Pro)"
+    echo "T6020 (Apple M2 Pro)"
     echo "VMAPPLE (Apple Virtual Machine)"
     echo ""
     echo "Try again with a valid Machine configuration."
@@ -167,7 +188,7 @@ install_deps() {
             /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
             # Ensure Homebrew is in the PATH
             export PATH="/usr/local/bin:$PATH"
-            sucess "Homebrew installation completed."
+            success "Homebrew installation completed."
         else
             exit 1
         fi
@@ -203,6 +224,7 @@ install_deps() {
     fi
 }
 
+# Function to install the Kernel Dev Kit based on the macOS Version Variable
 install_kdk() {
     if [ -z "$MACOS_VERSION" ]; then
         echo "MACOS_VERSION variable does not exist! Something went wrong..."
@@ -339,6 +361,7 @@ install_kdk() {
     fi
 }
 
+# Function to git clone the XNU Source from Carnations
 get_xnu_source() {
     if [ -d "${WORK_DIR}/xnu" ]; then
         # If the directory already exists, inform the user and exit
@@ -359,6 +382,7 @@ get_xnu_source() {
     fi
 }
 
+# Function to check and init a venv, or create one if it doesn't exist
 init_venv() {
     info "A venv is required to continue, now checking or creating one."
     if [ ! -d "${WORK_DIR}/venv" ]; then
@@ -369,6 +393,7 @@ init_venv() {
     source "${WORK_DIR}/venv/bin/activate"
 }
 
+# Function to build bootstrap_cmds dependency
 build_bootstrap_cmds() {
     if [ "$(find "${FAKEROOT_DIR}" -name 'mig' | wc -l)" -gt 0 ]; then
         success "bootstrap_cmds have been previously built. No action required."
@@ -395,6 +420,7 @@ build_bootstrap_cmds() {
     cd "${WORK_DIR}"
 }
 
+# Function to build dtrace dependency
 build_dtrace() {
     if [ "$(find "${FAKEROOT_DIR}" -name 'ctfmerge' | wc -l)" -gt 0 ]; then
         success "dtrace has been previously built. No action required."
@@ -417,6 +443,7 @@ build_dtrace() {
     cd "${WORK_DIR}"
 }
 
+# Function to build AvailabilityVersions dependency
 build_availabilityversions() {
     if [ "$(find "${FAKEROOT_DIR}" -name 'availability.pl' | wc -l)" -gt 0 ]; then
         success "AvailabilityVersions has been previously built. No action required."
@@ -439,6 +466,7 @@ build_availabilityversions() {
     cd "${WORK_DIR}"
 }
 
+# Function to install the XNU Headers
 install_xnu_headers() {
     if [ ! -f "${HAVE_WE_INSTALLED_HEADERS_YET}" ]; then
         info "Installing XNU Headers..."
@@ -457,6 +485,7 @@ install_xnu_headers() {
     fi
 }
 
+# Function to install libsystem Headers
 install_libsystem_headers() {
     if [ ! -d "${FAKEROOT_DIR}/System/Library/Frameworks/System.framework" ]; then
         info "Installing Libsystem Headers..."
@@ -480,6 +509,7 @@ install_libsystem_headers() {
     fi
 }
 
+# Function to install libsyscall Headers
 install_libsyscall_headers() {
     if [ ! -f "${FAKEROOT_DIR}/usr/include/os/proc.h" ]; then
         info "Installing libsyscall Headers..."
@@ -496,6 +526,7 @@ install_libsyscall_headers() {
     fi
 }
 
+# Function to build and install libplatform
 build_libplatform() {
     if [ ! -f "${FAKEROOT_DIR}/usr/local/include/_simple.h" ]; then
         info "Building libplatform..."
@@ -516,6 +547,7 @@ build_libplatform() {
     fi
 }
 
+# Function to build and install libdispatch
 build_libdispatch() {
     if [ ! -f "${FAKEROOT_DIR}/usr/local/lib/kernel/libfirehose_kernel.a" ]; then
         info "Building libdispatch..."
@@ -543,6 +575,7 @@ build_libdispatch() {
     fi
 }
 
+# Main function to build XNU source
 build_xnu() {
     if [ ! -f "${BUILD_DIR}/xnu-10063.121.3~5/kernel.${KERNEL_TYPE}" ]; then
         info "Building XNU kernel..."
@@ -552,10 +585,306 @@ build_xnu() {
         SYMROOT="${BUILD_DIR}/xnu.sym"
         
         cd "${SRCROOT}"
-        make install -j8 VERBOSE=YES SDKROOT=macosx TARGET_CONFIGS="$KERNEL_CONFIG $ARCH_CONFIG $MACHINE_CONFIG" CONCISE=0 LOGCOLORS=y BUILD_WERROR=0 BUILD_LTO=0 SRCROOT="${SRCROOT}" OBJROOT="${OBJROOT}" SYMROOT="${SYMROOT}" DSTROOT="${DSTROOT}" FAKEROOT_DIR="${FAKEROOT_DIR}" KDKROOT="${KDKROOT}" TIGHTBEAMC=${TIGHTBEAMC} RC_DARWIN_KERNEL_VERSION=${RC_DARWIN_KERNEL_VERSION}
+        make install -j12 VERBOSE=YES SDKROOT=macosx TARGET_CONFIGS="$KERNEL_CONFIG $ARCH_CONFIG $MACHINE_CONFIG" CONCISE=0 LOGCOLORS=y BUILD_WERROR=0 BUILD_LTO=0 SRCROOT="${SRCROOT}" OBJROOT="${OBJROOT}" SYMROOT="${SYMROOT}" DSTROOT="${DSTROOT}" FAKEROOT_DIR="${FAKEROOT_DIR}" KDKROOT="${KDKROOT}" TIGHTBEAMC=${TIGHTBEAMC} RC_DARWIN_KERNEL_VERSION=${RC_DARWIN_KERNEL_VERSION}
         cd "${WORK_DIR}"
     else
         info "XNU kernel.${KERNEL_TYPE} has already been built. No action required."
+    fi
+}
+
+# Function to check for folder existence and create it if it doesn't exist
+check_and_create_folder() {
+    local folder_path=$1
+    if [[ ! -d "$folder_path" ]]; then
+        mkdir -p "$folder_path"
+        success "Folder created: $folder_path"
+    else
+        error "Folder already exists: $folder_path"
+    fi
+}
+
+# Function to check for folder existence and delete it if it exists
+check_and_delete_folder() {
+    local folder_path=$1
+    if [[ -d "$folder_path" ]]; then
+        rm -rf "$folder_path"
+       success "Folder deleted: $folder_path"
+    else
+        error "Folder does not exist: $folder_path"
+    fi
+}
+
+# Function to detect Build Artifacts
+build_checker() {
+    # Scan the BUILD_DIR for directories starting with "xnu-" followed by numbers
+    for dir in "${BUILD_DIR}"/xnu-*; do
+        if [[ -d "$dir" && "$dir" =~ xnu-[0-9]+ ]]; then
+            # Extract the version from the directory name
+            xnu_built_version="${dir##*/}"
+            success "Detected XNU Build Version: ${xnu_built_version}"
+            break
+        fi
+    done
+
+    # Print message if no xnu build is found
+    if [ -z "$xnu_built_version" ]; then
+        error "No compiled XNU build detected in ${BUILD_DIR}"
+        return 1
+    fi
+
+    # Check for folder starting with KERNEL_CONFIG (DEVELOPMENT or RELEASE)
+    for config_dir in "${BUILD_DIR}/${xnu_built_version}/${KERNEL_CONFIG}"*; do
+        if [[ -d "$config_dir" ]]; then
+            kernel_config_folder="$config_dir"
+            success "Detected Kernel Folder: ${kernel_config_folder}"
+            break
+        fi
+    done
+
+    # Print message if no kernel config folder is found
+    if [ -z "$kernel_config_folder" ]; then
+        error "No ${KERNEL_CONFIG} folder detected in ${BUILD_DIR}/${xnu_built_version}"
+        return 1
+    fi
+}
+
+# Function to build Kernel Caches
+kc_build() {
+    kerneltypekc=$(echo "$KERNEL_CONFIG" | tr '[:upper:]' '[:lower:]')
+    
+    if [ "$MACHINE_CONFIG" != "NONE" ]; then
+        machconfkc=$(echo "$MACHINE_CONFIG" | tr '[:upper:]' '[:lower:]')
+        kernel_path="$kernel_config_folder/kernel.$kerneltypekc.$machconfkc"
+    else
+        kernel_path="$kernel_config_folder/kernel.$kerneltypekc"
+    fi
+
+    # Test if the kernel file exists
+    if [ -f "$kernel_path" ]; then
+        success "Kernel file found: $kernel_path"
+
+        BKE="$kernel_config_folder/BootKernelExtensions.kc"
+        SKE="$kernel_config_folder/SystemKernelExtensions.kc"
+
+        # Create Kernel Cache using kmutil
+        running "Creating Kernel Cache files with kmutil..."
+
+        # Print Variables for Debugging
+        info "Boot KernelExtensions returned path: $BKE"
+        info "System KernelExtensions returned path: $SKE"
+        
+        if [ "$MACHINE_CONFIG" != "NONE" ]; then
+            error "kmutil for ARM64 has not been configured yet."
+            return 1
+        else
+            kmutil create -a x86_64 -Z -n boot sys \
+            -B "$BKE" \
+            -S "$SKE" \
+            -k "$kernel_path" \
+            --variant-suffix "$kerneltypekc" \
+            --elide-identifier com.apple.driver.AppleIntelTGLGraphicsFramebuffer \
+            --elide-identifier com.apple.driver.ExclaveSEPManagerProxy \
+            --elide-identifier com.apple.driver.EXDisplayPipe \
+            --elide-identifier com.apple.ExclaveKextClient \
+            --elide-identifier com.apple.EXBrightKext
+
+            # Update Variables
+            BKE="$kernel_config_folder/BootKernelExtensions.kc.$kerneltypekc"
+            SKE="$kernel_config_folder/SystemKernelExtensions.kc.$kerneltypekc"
+        fi
+    else
+        error "Kernel file does not exist: $kernel_path"
+    fi
+
+    # Check the result of kmutil command
+    if [[ $? -eq 0 ]]; then
+        success "kmutil successfully built the kernel cache."
+    else
+        echo "Failed to execute kmutil command."
+        exit 1
+    fi
+}
+
+find_mount_rw_bootdisk() {
+    info "Getting Root APFS Volume this system is currently booted from..."
+
+    # Get the identifier of the boot volume
+    boot_volume=$(diskutil info / | grep 'Device Identifier' | awk '{print $3}')
+    running "Boot Volume Device Identifier: $boot_volume"
+
+    # Get the part of whole disk number
+    part_of_whole=$(diskutil info "$boot_volume" | grep 'Part of Whole' | awk '{print $4}')
+    running "Part of Whole Disk: $part_of_whole"
+
+    # Get the volume name and trim spaces
+    volume_name=$(diskutil info "$boot_volume" | grep 'Volume Name' | awk -F': ' '{print $2}' | xargs)
+    running "Volume Name: $volume_name"
+
+    # List all partitions on the whole disk and identify the main APFS volume
+    main_apfs_volume=""
+    running "Partitions on $part_of_whole:"
+    while read -r line; do
+        running "$line"
+        if [[ "$line" == *"$volume_name"* ]]; then
+            main_apfs_volume=$(echo "$line" | awk '{print $NF}')
+        fi
+    done < <(diskutil list "$part_of_whole")
+
+    success "Root APFS Volume: $main_apfs_volume"
+
+    # Define the folder path relative to the working directory
+    APFSMountPoint="$WORK_DIR/APFSMountPoint"
+    success "APFSMountPoint returned path: $APFSMountPoint"
+
+    # Check and create the folder if missing
+    check_and_create_folder "$APFSMountPoint"
+
+    # Verify the main_apfs_volume value before mounting
+    if [ -z "$main_apfs_volume" ]; then
+        error "main_apfs_volume is empty! Cannot continue..."
+        exit 1
+    else
+        info "main_apfs_volume value: /dev/$main_apfs_volume"
+    fi
+
+    # Adding a short delay
+    sleep 1
+
+    # Attempt to mount the main APFS volume to the APFS mount point
+    if sudo mount -o nobrowse -t apfs /dev/"$main_apfs_volume" "$APFSMountPoint"; then
+        success "Mounted Root APFS Volume at: $APFSMountPoint"
+    else
+        error "Failed to mount APFS Volume as R/W! Cannot continue..."
+        exit 1
+    fi
+}
+
+copy_xnu_to_disk() {
+    # Extract the file names from the variables
+    kernel_fileName=$(basename "$kernel_path")
+    BootKernelExtensions_fileName=$(basename "$BKE")
+    SystemKernelExtensions_fileName=$(basename "$SKE")
+
+    # Print Variables for debugging
+    running "kernel_fileName returned name: $kernel_fileName"
+    running "BootKernelExtensions_fileName returned name: $BootKernelExtensions_fileName"
+    running "SystemKernelExtensions_fileName returned name: $SystemKernelExtensions_fileName"
+    
+    # Copy the kernel file and check the result
+    info "Copying $kernel_fileName to $APFSMountPoint/System/Library/Kernels/$kernel_fileName"
+    sudo cp "$kernel_path" "$APFSMountPoint/System/Library/Kernels/$kernel_fileName"
+    if [[ $? -eq 0 ]]; then
+        success "Successfully copied $kernel_fileName!"
+    else
+        error "Failed to copy $kernel_fileName to disk!"
+        exit 1
+    fi
+
+    # Copy the BootKernelExtensions file and check the result
+    info "Copying $BootKernelExtensions_fileName to $APFSMountPoint/System/Library/KernelCollections/$BootKernelExtensions_fileName"
+    sudo cp "$BKE" "$APFSMountPoint/System/Library/KernelCollections/$BootKernelExtensions_fileName"
+    if [[ $? -eq 0 ]]; then
+        success "Successfully copied $kernel_fileName!"
+    else
+        error "Failed to copy $kernel_fileName to disk!"
+        exit 1
+    fi
+
+    # Copy the SystemKernelExtensions file and check the result
+    info "Copying $SystemKernelExtensions_fileName to $APFSMountPoint/System/Library/KernelCollections/$SystemKernelExtensions_fileName"
+    sudo cp "$SKE" "$APFSMountPoint/System/Library/KernelCollections/$SystemKernelExtensions_fileName"
+    if [[ $? -eq 0 ]]; then
+        success "Successfully copied $SystemKernelExtensions_fileName!"
+    else
+        error "Failed to copy $SystemKernelExtensions_fileName to disk!"
+        exit 1
+    fi
+}
+
+bless_bootdisk() {
+    running "Running bless command to create latest APFS snapshot to boot..."
+    sudo bless --folder "$APFSMountPoint/System/Library/CoreServices" --bootefi --create-snapshot
+    if [[ $? -eq 0 ]]; then
+        success "Successfully created snapshot with bless!"
+    else
+        error "Failed to create snapshot with bless!"
+        exit 1
+    fi
+}
+
+sanity_check_bootargs() {
+    # Check boot-args for kcsuffix=development
+    boot_args=$(nvram boot-args | awk -F'boot-args' '{print $2}' | xargs)
+    running "Current boot-args: $boot_args"
+
+    # Check for kcsuffix=development
+    if [[ "$boot_args" != *"kcsuffix=development"* ]]; then
+        warning "Warning: kcsuffix=development is not set in boot-args. You may not be booting into the installed kernel."
+    else
+        # Check for wlan.skywalk.enable=0 in boot-args
+        if [[ "$boot_args" != *"wlan.skywalk.enable=0"* ]]; then
+            warning "Warning: wlan.skywalk.enable=0 is not set in boot-args. You may encounter a Kernel Panic loop due to Skywalk not being included in XNU Open Source."
+        fi
+
+        # Check for dk=0 in boot-args
+        if [[ "$boot_args" != *"dk=0"* ]]; then
+            warning "Warning: dk=0 is not set in boot-args. You may have issues loading kexts."
+        fi
+    fi
+
+    success "boot-args are configured properly for optimal booting success!"
+}
+
+install_routine() {
+    build_checker
+    
+    # Check MACHINE_CONFIG and run kc_build if built for X86_64
+    if [[ "$MACHINE_CONFIG" == "NONE" ]]; then
+        kc_build
+    fi
+    
+    find_mount_rw_bootdisk
+    copy_xnu_to_disk
+    bless_bootdisk
+    sanity_check_bootargs
+    prompt_reboot
+}
+
+prompt_install() {
+    while true; do
+        read -p "Do you want to install the built kernel now? (y/n) [y]: " user_input
+        user_input=${user_input:-y} # Default to 'y' if no input is given, its important to build with the flags used to build.
+
+        case "$user_input" in
+            [Yy]* ) install_routine; break;;
+            [Nn]* ) echo "Install skipped."; break;;
+            * ) echo "Please answer y or n.";;
+        esac
+    done
+}
+
+prompt_reboot() {
+    while true; do
+        read -p "Do you want to reboot now? (y/n) [n]: " user_input
+        user_input=${user_input:-n} # Default to 'n' if no input is given
+
+        case "$user_input" in
+            [Yy]* ) sudo reboot; break;;
+            [Nn]* ) unmount_apfsmountpoint; break;;
+            * ) echo "Please answer y or n.";;
+        esac
+    done
+}
+
+unmount_apfsmountpoint() {
+    running "Unmounting APFS Volume..."
+
+    # Attempt to mount the main APFS volume to the APFS mount point
+    if sudo umount "$APFSMountPoint"; then
+        success "Successfully unmounted Root APFS Volume at: $APFSMountPoint"
+    else
+        error "Failed to unmount APFS Volume! A reboot is highly recommended..."
+        exit 1
     fi
 }
 
@@ -570,6 +899,9 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         fetch)
             ACTION="fetch"
+            ;;
+        install)
+            ACTION="install"
             ;;
         -h|--help)
             show_help
@@ -588,7 +920,13 @@ while [[ "$#" -gt 0 ]]; do
             shift
             ;;
         -m|--machine)
-            MACHINE_CONFIG="$2"
+            if [[ "$2" == "help" ]]; then
+                show_valid_machines
+                shift
+            else
+                MACHINE_CONFIG="$2"
+                shift
+            fi
             shift
             ;;
         *)
@@ -602,7 +940,7 @@ done
 
 # Ensure a valid action is provided
 if [ -z "${ACTION-}" ]; then
-    error "An action (fetch, clean or build) is required."
+    error "An action (fetch, clean, build, or install) is required."
     show_help
     exit 1
 fi
@@ -669,11 +1007,27 @@ case "$ACTION" in
         build_libplatform
         build_libdispatch
         build_xnu
-        success "XNU Build Done!"
+        success "XNU Build Done! You can now install it."
+
+        prompt_install
         ;;
     fetch)
         echo "Fetching XNU Source from Carnations-Botanica..."
         get_xnu_source
+        ;;
+    install)
+        build_checker
+        
+        # Check MACHINE_CONFIG and run kc_build if built for X86_64
+        if [[ "$MACHINE_CONFIG" == "NONE" ]]; then
+            kc_build
+        fi
+        
+        find_mount_rw_bootdisk
+        copy_xnu_to_disk
+        bless_bootdisk
+        sanity_check_bootargs
+        prompt_reboot
         ;;
     *)
         error "Invalid action specified."
